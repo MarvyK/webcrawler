@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Web Crawler</title>
+    <link rel="stylesheet" href="css/styles.css" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+  </head>
+  <body>
+    <header>
+      <h1>webcrawler</h1>
+      <span class="tagline">// URL discovery tool</span>
+    </header>
+
+    <main>
+      <aside>
+        <div class="field">
+          <label>Target URL</label>
+          <input type="text" id="url-input" placeholder="https://example.com" />
+        </div>
+
+        <div class="field">
+          <label>Max depth — <span id="depth-val" style="color: var(--green); font-family: var(--mono)">3</span></label>
+          <input type="range" id="depth-range" min="1" max="6" value="3" oninput="document.getElementById('depth-val').textContent = this.value" />
+          <div class="range-labels"><span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span></div>
+        </div>
+
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="val" id="s-found">0</div>
+            <div class="lbl">URLs found</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="s-crawled">0</div>
+            <div class="lbl">Crawled</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="s-depth">—</div>
+            <div class="lbl">Cur depth</div>
+          </div>
+          <div class="stat-card">
+            <div class="val" id="s-queued">0</div>
+            <div class="lbl">Queued</div>
+          </div>
+        </div>
+
+        <div class="progress-wrap" id="progress-wrap">
+          <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-fill"></div></div>
+          <div class="progress-label" id="progress-label">Initialising…</div>
+        </div>
+
+        <button class="btn-crawl" id="btn-crawl" onclick="startCrawl()">START CRAWL</button>
+        <button class="btn-stop" id="btn-stop" onclick="stopCrawl()">STOP</button>
+      </aside>
+
+      <section>
+        <div class="results-header">
+          <div class="results-title">results — <span id="count-label">0</span> urls</div>
+          <div class="actions">
+            <button class="btn-action" id="btn-copy" onclick="copyAll()" disabled>copy all</button>
+            <button class="btn-action" id="btn-csv" onclick="downloadCSV()" disabled>export csv</button>
+            <button class="btn-action" onclick="clearResults()">clear</button>
+          </div>
+        </div>
+        <div class="filter-bar">
+          <input type="text" id="filter-input" placeholder="filter urls…" oninput="filterUrls()" />
+        </div>
+        <div id="url-list">
+          <div class="empty-state" id="empty-state">
+            <div class="icon">◎</div>
+            <div>enter a url and start crawling</div>
+          </div>
+        </div>
+        <div class="log-strip" id="log-strip">ready<span class="cursor"></span></div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast">copied to clipboard</div>
+
+    <script>
+      let allUrls = [];
+      let evtSource = null;
+      let crawling = false;
+
+      function startCrawl() {
+        const url = document.getElementById('url-input').value.trim();
+        const depth = parseInt(document.getElementById('depth-range').value);
+        if (!url) {
+          log('⚠ enter a target url');
+          return;
+        }
+
+        allUrls = [];
+        document.getElementById('url-list').innerHTML = '';
+        document.getElementById('empty-state') && document.getElementById('empty-state').remove();
+        updateStats(0, 0, '—', 0);
+        document.getElementById('count-label').textContent = '0';
+        document.getElementById('btn-copy').disabled = true;
+        document.getElementById('btn-csv').disabled = true;
+        document.getElementById('btn-crawl').disabled = true;
+        document.getElementById('btn-stop').style.display = 'block';
+        document.getElementById('progress-wrap').style.display = 'flex';
+        crawling = true;
+
+        fetch('/crawl', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url, depth }),
+        })
+          .then((res) => {
+            const reader = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+
+            function read() {
+              reader.read().then(({ done, value }) => {
+                if (done) {
+                  onDone();
+                  return;
+                }
+                buf += decoder.decode(value, { stream: true });
+                const parts = buf.split('\n\n');
+                buf = parts.pop();
+                for (const part of parts) {
+                  const line = part.replace(/^data: /, '').trim();
+                  if (!line) continue;
+                  try {
+                    handleEvent(JSON.parse(line));
+                  } catch {}
+                }
+                if (crawling) read();
+              });
+            }
+            read();
+          })
+          .catch((err) => {
+            log('✗ could not connect to server — is server.js running?');
+            resetUI();
+          });
+      }
+
+      function handleEvent(e) {
+        if (e.type === 'crawling') {
+          log(`crawling: ${e.url}`);
+          updateStats(allUrls.length, e.crawled, e.depth, e.queued);
+          document.getElementById('progress-label').textContent = `depth ${e.depth} / queued ${e.queued}`;
+        } else if (e.type === 'found') {
+          allUrls.push({ url: e.url, status: e.status, depth: e.depth });
+          addRow(e.url, e.status, e.depth);
+          updateStats(allUrls.length, e.crawled, e.depth, e.queued);
+          document.getElementById('count-label').textContent = allUrls.length;
+        } else if (e.type === 'error') {
+          log(`✗ ${e.url} — ${e.error}`);
+        } else if (e.type === 'done') {
+          onDone();
+        }
+      }
+
+      function addRow(url, status, depth) {
+        const list = document.getElementById('url-list');
+        const filter = document.getElementById('filter-input').value.toLowerCase();
+        const row = document.createElement('div');
+        row.className = 'url-row';
+        row.dataset.url = url;
+        const isOk = status >= 200 && status < 300;
+        row.innerHTML = `
+    <div class="depth-badge">d${depth}</div>
+    <div class="status-dot ${isOk ? '' : 'error'}"></div>
+    <div class="url-text" title="${url}" onclick="navigator.clipboard.writeText('${url.replace(/'/g, "\\'")}');toast('url copied')">${url}</div>
+    <div class="status-code ${isOk ? 'ok' : 'err'}">${status}</div>
+  `;
+        if (filter && !url.toLowerCase().includes(filter)) row.style.display = 'none';
+        list.appendChild(row);
+        list.scrollTop = list.scrollHeight;
+      }
+
+      function onDone() {
+        crawling = false;
+        log(`✓ done — ${allUrls.length} urls found`);
+        resetUI();
+        if (allUrls.length > 0) {
+          document.getElementById('btn-copy').disabled = false;
+          document.getElementById('btn-csv').disabled = false;
+        }
+        document.getElementById('progress-label').textContent = `complete — ${allUrls.length} urls found`;
+      }
+
+      function stopCrawl() {
+        crawling = false;
+        log('stopped by user');
+        resetUI();
+      }
+
+      function resetUI() {
+        document.getElementById('btn-crawl').disabled = false;
+        document.getElementById('btn-stop').style.display = 'none';
+      }
+
+      function updateStats(found, crawled, depth, queued) {
+        document.getElementById('s-found').textContent = found;
+        document.getElementById('s-crawled').textContent = crawled;
+        document.getElementById('s-depth').textContent = depth;
+        document.getElementById('s-queued').textContent = queued;
+      }
+
+      function filterUrls() {
+        const f = document.getElementById('filter-input').value.toLowerCase();
+        document.querySelectorAll('.url-row').forEach((row) => {
+          row.style.display = !f || row.dataset.url.includes(f) ? '' : 'none';
+        });
+      }
+
+      function copyAll() {
+        const text = allUrls.map((u) => u.url).join('\n');
+        navigator.clipboard.writeText(text).then(() => toast(`${allUrls.length} urls copied`));
+      }
+
+      function downloadCSV() {
+        const csv = 'URL,Status,Depth\n' + allUrls.map((u) => `${u.url},${u.status},${u.depth}`).join('\n');
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        a.download = 'crawled-urls.csv';
+        a.click();
+      }
+
+      function clearResults() {
+        allUrls = [];
+        document.getElementById('url-list').innerHTML = '<div class="empty-state" id="empty-state"><div class="icon">◎</div><div>enter a url and start crawling</div></div>';
+        document.getElementById('count-label').textContent = '0';
+        document.getElementById('btn-copy').disabled = true;
+        document.getElementById('btn-csv').disabled = true;
+        updateStats(0, 0, '—', 0);
+        document.getElementById('progress-wrap').style.display = 'none';
+        log('cleared');
+      }
+
+      function log(msg) {
+        const el = document.getElementById('log-strip');
+        el.innerHTML = `${msg}<span class="cursor"></span>`;
+      }
+
+      function toast(msg) {
+        const t = document.getElementById('toast');
+        t.textContent = msg;
+        t.classList.add('show');
+        setTimeout(() => t.classList.remove('show'), 2000);
+      }
+    </script>
+  </body>
+</html>
