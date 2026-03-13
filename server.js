@@ -14,13 +14,21 @@ const PORT = process.env.PORT || 3001;
 
 function extractLinks(html, pageUrl) {
   const links = [];
-  const regex = /href=["']([^"'#][^"']*?)["']/gi;
-  let match;
-  while ((match = regex.exec(html)) !== null) {
-    try {
-      const resolved = new URL(match[1], pageUrl).href;
-      links.push(resolved);
-    } catch {}
+  const patterns = [
+    /href=["']([^"'#][^"']*?)["']/gi,
+    /src=["']([^"'#][^"']*?\.html[^"']*?)["']/gi,
+    /(?:url|path|href|route|navigate|location\.href)\s*[=:,\(]\s*["']([^"'#][^"']*?\.html[^"']*?)["']/gi,
+    /["']([\/][^"']*?\.html[^"']*?)["']/gi,
+  ];
+
+  for (const regex of patterns) {
+    let match;
+    while ((match = regex.exec(html)) !== null) {
+      try {
+        const resolved = new URL(match[1], pageUrl).href;
+        links.push(resolved);
+      } catch {}
+    }
   }
   return links;
 }
@@ -75,9 +83,11 @@ async function crawl(startUrl, maxDepth, onProgress) {
       const html = await res.text();
       const links = extractLinks(html, clean);
 
+      const basePath = base.pathname.endsWith('/') ? base.pathname : base.pathname.substring(0, base.pathname.lastIndexOf('/') + 1);
+
       for (const link of links) {
         const norm = normalise(link);
-        if (norm && new URL(norm).hostname === base.hostname && !visited.has(norm)) {
+        if (norm && new URL(norm).hostname === base.hostname && new URL(norm).pathname.startsWith(basePath) && !visited.has(norm)) {
           queue.push({ url: norm, depth: depth + 1 });
         }
       }
